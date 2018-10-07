@@ -1,3 +1,10 @@
+# MovieLens data
+ml-20m/
+ml-latest-small/
+
+# Temp MatrixMarket files
+*.MM
+
 # History files
 .Rhistory
 .Rapp.history
