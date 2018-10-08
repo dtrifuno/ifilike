@@ -8,6 +8,7 @@ ml-latest-small/
 # History files
 .Rhistory
 .Rapp.history
+.R.Rout
 
 # Session Data files
 .RData
