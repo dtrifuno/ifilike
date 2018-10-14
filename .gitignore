@@ -1,9 +1,7 @@
 # MovieLens data
 ml-20m/
 ml-latest-small/
-
-# Temp MatrixMarket files
-*.MM
+ml-latest/
 
 # History files
 .Rhistory
