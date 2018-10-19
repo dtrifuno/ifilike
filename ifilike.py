@@ -27,7 +27,7 @@ class MovieLens:
         self._ratings_df["rating"] = self._ratings_df["rating"] - MEAN_SCORE
 
         self.rekey_movies()
-        self.n_movies = max(self._movies_df["movieId"])
+        self.n_movies = max(self._movies_df["movieId"]) + 1
         self._ratings_matrix = None
         self._train_matrix = None
         self._test_matrix = None
@@ -46,7 +46,7 @@ class MovieLens:
         self._ratings_df["movieId"] = self._ratings_df["movieId"].apply(
             reduced_ids.get)
 
-
+    @staticmethod
     def ratings_to_matrix(ratings_df, columns):
         return coo_matrix((ratings_df["rating"],
                            (ratings_df["userId"], ratings_df["movieId"])),
@@ -72,10 +72,10 @@ class MovieLens:
         train_ids = set(user_ids[:number_of_train_ids])
 
         train_df = self._ratings_df[self._ratings_df["userId"].isin(train_ids)]
-        test_df = self._ratings_df[~se.f_ratings_df["userId"].isin(train_ids)]
+        test_df = self._ratings_df[~self._ratings_df["userId"].isin(train_ids)]
 
-        train_matrix = ratings_to_matrix(train_df, self._n_movies).tocsr()
-        test_matrix = ratings_to_matrix(test_df, self._n_movies).tocsr()
+        train_matrix = self.ratings_to_matrix(train_df, self.n_movies).tocsr()
+        test_matrix = self.ratings_to_matrix(test_df, self.n_movies).tocsr()
         return (train_matrix, test_matrix)
 
 
@@ -118,7 +118,7 @@ def relative_error(actual, approximate):
 
 class GridSearch:
     def __init__(self, train_matrix, max_components, max_neighbors):
-        self._rec_engine = train_matrix
+        self._train_matrix = train_matrix
         self._max_components = max_components
         self._max_neighbors = max_neighbors
 
@@ -142,7 +142,8 @@ class GridSearch:
         errors = pd.DataFrame(index=range(1, self._max_neighbors+1),
                               columns=range(1, self._max_components+1))
         for dim in range(1, self._max_components+1):
-            rec_engine = Recommender(train_matrix, dim, 1)
+            print(dim)
+            rec_engine = Recommender(self._train_matrix, dim, 1)
             for k in range(1, self._max_neighbors+1):
                 rec_engine._neighbors = k
                 errors.loc[dim, k] = self._get_error(rec_engine, test_matrix)
@@ -154,7 +155,8 @@ class GridSearch:
 
 def main():
     movielens = MovieLens("ml-latest-small")
-    gridsearcher = GridSearch(train_matrix, 10, 10)
+    test_matrix, train_matrix = movielens.get_train_test_split(0.75)
+    gridsearcher = GridSearch(train_matrix, 30, 10)
     print(gridsearcher.find_params(test_matrix, 0.002))
 
 
