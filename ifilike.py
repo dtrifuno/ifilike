@@ -1,16 +1,31 @@
+import copy
 import random
+from heapq import nlargest
 
 import numpy as np
 import pandas as pd
 
+from scipy.sparse.linalg import norm as sp_norm
 from scipy.linalg import norm
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csr_matrix, lil_matrix
 from scipy.sparse.linalg import svds
 
 random.seed(42)
 
 MEAN_SCORE = 2.75    # (MaxScore - MinScore) / 2, for normalization
 TRAIN_RATIO = 0.8    # what percentage of users will be used for training
+
+
+def get_n_largest(n, sparse_matrix):
+    m = coo_matrix(sparse_matrix)
+    if m.shape[0] == 1:
+        idx = m.col
+    elif m.shape[1] == 1:
+        idx = m.row
+    else:
+        raise ValueError("Expected row or column vector, not " + m.shape)
+    return [i for v, i in nlargest(n, (x for x in zip(m.data, idx)))]
+
 
 class MovieLens:
     def __init__(self,
@@ -52,17 +67,21 @@ class MovieLens:
                            (ratings_df["userId"], ratings_df["movieId"])),
                           shape=(max(ratings_df["userId"])+1, columns))
 
+    def title_to_movie_id(self, title):
+        return next(i for i, v in enumerate(self._movies_df['title'] == title)
+                    if v)
 
-    def movie_to_id(self, movie):
-        pass
+    def movie_id_to_title(self, movie_id):
+        return self._movies_df.iloc[movie_id, ]['title']
 
-
-    def id_to_movie(self, movie_id):
-        pass
-
+    def df_to_vector(self, df):
+        vector = lil_matrix((1, self.n_movies))
+        for _, (title, rating) in df.iterrows():
+            vector[0, self.title_to_movie_id(title)] = rating - MEAN_SCORE
+        return vector.tocsr()
 
     def get_matrix(self):
-        pass
+        return self.ratings_to_matrix(self._ratings_df, self.n_movies).tocsr()
 
 
     def get_train_test_split(self, train_ratio):
@@ -72,7 +91,11 @@ class MovieLens:
         train_ids = set(user_ids[:number_of_train_ids])
 
         train_df = self._ratings_df[self._ratings_df["userId"].isin(train_ids)]
+        #reduced_train_ids = {k:v for (v, k) in enumerate(train_df["userId"])}
+        #train_df["userId"] = train_df["userId"].apply(reduced_train_ids.get)
         test_df = self._ratings_df[~self._ratings_df["userId"].isin(train_ids)]
+        #reduced_test_ids = {k:v for (v, k) in enumerate(test_df["userId"])}
+        #test_df["userId"] = test_df["userId"].apply(reduced_test_ids.get)
 
         train_matrix = self.ratings_to_matrix(train_df, self.n_movies).tocsr()
         test_matrix = self.ratings_to_matrix(test_df, self.n_movies).tocsr()
@@ -88,32 +111,28 @@ class Recommender:
         self._original_matrix = train_matrix
         self._reduced_matrix = u.dot(np.diag(s))
         # normalize the rows in the reduced matrix
-        for i, _ in enumerate(self._reduced_matrix):
-            norm_i = norm(self._reduced_matrix[i])
-            self._reduced_matrix[i] = self._reduced_matrix[i] / norm_i
+        self._reduced_matrix = self._reduced_matrix / \
+                np.linalg.norm(self._reduced_matrix, axis=-1)[:, np.newaxis]
 
     def get_estimated_vector(self, user_vector):
         # project and normalize user vector
-        reduced_vector = (self._vt).dot(user_vector)
+        reduced_vector = self._vt * user_vector.T
         reduced_vector = reduced_vector / norm(reduced_vector)
-        cos_sims = self._reduced_matrix.dot(reduced_vector.T)
+        cos_sims = self._reduced_matrix.dot(reduced_vector)
 
         k = self._neighbors
-        neighbors = np.argpartition(cos_sims, -k)[-k:]
-        estimated_vector = np.zeros(self._original_matrix.shape[1])
+        neighbors = get_n_largest(k, cos_sims)
+        estimated_vector = csr_matrix((1, self._original_matrix.shape[1]))
         for neighbor in neighbors:
-            estimated_vector += self._original_matrix[neighbor].toarray()[0]
+            estimated_vector += self._original_matrix.getrow(neighbor)
         estimated_vector /= len(neighbors)
         return estimated_vector
 
     def get_recommendations(self, user_vector, n=10):
         estimated_vec = self.get_estimated_vector(user_vector)
-        estimated_vec[user_vector.nonzero()[0]] = -2.5
-        top_scores = np.argpartition(estimated_vec, -n)[-n:]
-        return top_scores
-
-def relative_error(actual, approximate):
-    return abs((actual - approximate) / actual)
+        already_rated = user_vector.nonzero()[1]
+        top_scorers = get_n_largest(n + len(already_rated), estimated_vec)
+        return [id_ for id_ in top_scorers if id_ not in already_rated][:n]
 
 
 class GridSearch:
@@ -123,41 +142,43 @@ class GridSearch:
         self._max_neighbors = max_neighbors
 
     def _drop_entries(self, vec, ratio):
-        nonzero_idxs = vec.nonzero()[0]
+        """ return a copy of the vector with ratio of nonzero entries zeroed """
+        nonzero_idxs = vec.nonzero()[1]
         random.shuffle(nonzero_idxs)
-        n_drop = round(len(nonzero_idxs) * (1-ratio))
+        n_drop = round(ratio * len(nonzero_idxs))
         drop_idxs = nonzero_idxs[:n_drop]
-        vec[drop_idxs] = 0
+        dropped_vec = lil_matrix(vec)
+        for idx in drop_idxs:
+            dropped_vec[:, idx] = 0
+        return dropped_vec.tocsr()
 
     def _get_error(self, rec, test_matrix, norm_ord=2):
         total_error = 0
-        for vec in test_matrix.toarray():
-            dropped_vec = vec
-            self._drop_entries(dropped_vec, 0.75)
+        test_users = test_matrix.shape[0]
+        for i in range(test_users):
+            vec = test_matrix.getrow(i)
+            dropped_vec = self._drop_entries(vec, 0.25)
             estimated_vec = rec.get_estimated_vector(dropped_vec)
-            total_error += norm(vec - estimated_vec, norm_ord)
+            total_error += sp_norm(vec - estimated_vec, ord=norm_ord, axis=0)[0]
         return total_error
 
-    def find_params(self, test_matrix, tol):
+    def find_params(self, test_matrix):
         errors = pd.DataFrame(index=range(1, self._max_neighbors+1),
                               columns=range(1, self._max_components+1))
         for dim in range(1, self._max_components+1):
-            print(dim)
             rec_engine = Recommender(self._train_matrix, dim, 1)
             for k in range(1, self._max_neighbors+1):
+                print((dim, k))
                 rec_engine._neighbors = k
                 errors.loc[dim, k] = self._get_error(rec_engine, test_matrix)
-                if dim > 1 and k > 1 \
-                    and relative_error(errors.loc[dim, k], errors.loc[dim-1, k-1]) < tol:
-                    return (dim, k)
-        return (dim, k)
+        print(errors)
 
 
 def main():
     movielens = MovieLens("ml-latest-small")
     test_matrix, train_matrix = movielens.get_train_test_split(0.75)
-    gridsearcher = GridSearch(train_matrix, 30, 10)
-    print(gridsearcher.find_params(test_matrix, 0.002))
+    gridsearcher = GridSearch(train_matrix, 2, 2)
+    gridsearcher.find_params(test_matrix)
 
 
 if __name__ == '__main__':
