@@ -3,6 +3,8 @@ ml-20m/
 ml-latest-small/
 ml-latest/
 
+__pycache__/
+
 # History files
 .Rhistory
 .Rapp.history
